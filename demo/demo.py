@@ -4,6 +4,7 @@ import argparse
 import glob
 import multiprocessing as mp
 import os
+import gzip
 
 # fmt: off
 import sys
@@ -13,11 +14,11 @@ sys.path.insert(1, os.path.join(sys.path[0], '..'))
 import tempfile
 import time
 import warnings
-
+import torch
 import cv2
 import numpy as np
 import tqdm
-
+from pathlib import Path
 from detectron2.config import get_cfg
 from detectron2.data.detection_utils import read_image
 from detectron2.projects.deeplab import add_deeplab_config
@@ -42,6 +43,21 @@ def setup_cfg(args):
     return cfg
 
 
+def save_panoptic(predictions, demo, out_filename):
+    mask, segments = predictions["panoptic_seg"]
+    for segment in segments:
+        cat_id = segment["category_id"]
+        segment["category_name"] = demo.metadata.stuff_classes[cat_id]
+    with gzip.open(out_filename, "wb") as fid:
+        torch.save(
+            {
+                "mask": mask,
+                "segments": segments,
+                #"probs": predictions["panoptic_prob"],
+            }, fid
+        )
+
+
 def get_parser():
     parser = argparse.ArgumentParser(description="maskformer2 demo for builtin configs")
     parser.add_argument(
@@ -49,6 +65,10 @@ def get_parser():
         default="configs/coco/panoptic-segmentation/maskformer2_R50_bs16_50ep.yaml",
         metavar="FILE",
         help="path to config file",
+    )
+    parser.add_argument(
+        "--predictions",
+        help="Save raw predictions together with visualizations."
     )
     parser.add_argument("--webcam", action="store_true", help="Take inputs from webcam.")
     parser.add_argument("--video-input", help="Path to video file.")
@@ -108,10 +128,8 @@ if __name__ == "__main__":
     demo = VisualizationDemo(cfg)
 
     if args.input:
-        if len(args.input) == 1:
-            args.input = glob.glob(os.path.expanduser(args.input[0]))
-            assert args.input, "The input path(s) was not found"
-        for path in tqdm.tqdm(args.input, disable=not args.output):
+        for path in tqdm.tqdm(list(Path(args.input[0]).iterdir()), disable=not args.output):
+            path = str(path)
             # use PIL, to be consistent with evaluation
             img = read_image(path, format="BGR")
             start_time = time.time()
@@ -125,7 +143,6 @@ if __name__ == "__main__":
                     time.time() - start_time,
                 )
             )
-
             if args.output:
                 if os.path.isdir(args.output):
                     assert os.path.isdir(args.output), args.output
@@ -134,6 +151,9 @@ if __name__ == "__main__":
                     assert len(args.input) == 1, "Please specify a directory with args.output"
                     out_filename = args.output
                 visualized_output.save(out_filename)
+                if args.predictions:
+                    out_filename_noext, _ = os.path.splitext(out_filename)
+                    save_panoptic(predictions, demo, out_filename_noext + ".ptz")
             else:
                 cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
                 cv2.imshow(WINDOW_NAME, visualized_output.get_image()[:, :, ::-1])
