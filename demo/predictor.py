@@ -7,7 +7,7 @@ from collections import deque
 
 import cv2
 import torch
-
+from pathlib import Path
 from detectron2.data import MetadataCatalog
 from detectron2.engine.defaults import DefaultPredictor
 from detectron2.utils.video_visualizer import VideoVisualizer
@@ -35,7 +35,10 @@ class VisualizationDemo(object):
             self.predictor = AsyncPredictor(cfg, num_gpus=num_gpu)
         else:
             self.predictor = DefaultPredictor(cfg)
-            
+        colors = ['#e6194B', '#3cb44b', '#ffe119', '#4363d8', '#f58231', '#911eb4', '#42d4f4', '#bfef45',
+                  '#fabed4', '#469990', '#dcbeff', '#9A6324', '#fffac8', '#800000', '#aaffc3', '#808000',
+                  '#ffd8b1', '#000075', '#a9a9a9', '#f032e6', '#806020', '#ffffff']
+        self.colors = [hex_to_rgb(c) for c in colors]
 
     def run_on_image(self, image):
         """
@@ -50,6 +53,11 @@ class VisualizationDemo(object):
         predictions = self.predictor(image)
         # Convert image from OpenCV BGR format to Matplotlib RGB format.
         image = image[:, :, ::-1]
+        self.metadata = EasyDict()
+        self.metadata.stuff_colors = self.colors
+        self.metadata.thing_colors = self.colors
+        self.metadata.stuff_classes = get_scannet_classes()
+        self.metadata.thing_classes = get_scannet_classes()
         visualizer = Visualizer(image, self.metadata, instance_mode=self.instance_mode)
         if "panoptic_seg" in predictions:
             panoptic_seg, segments_info = predictions["panoptic_seg"]
@@ -218,3 +226,30 @@ class AsyncPredictor:
     @property
     def default_buffer_size(self):
         return len(self.procs) * 5
+
+
+def hex_to_rgb(x):
+    return [int(x[i:i + 2], 16) for i in (1, 3, 5)]
+
+
+def get_scannet_classes():
+    class_names = ["none"]
+    for cllist in [x.strip().split(',') for x in Path("scannet_reduced_things.csv").read_text().strip().splitlines()]:
+        class_names.append(cllist[0])
+    return class_names
+
+
+class EasyDict(dict):
+    """Convenience class that behaves like a dict but allows access with the attribute syntax."""
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(name)
+
+    def __setattr__(self, name, value):
+        self[name] = value
+
+    def __delattr__(self, name):
+        del self[name]

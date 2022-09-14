@@ -43,11 +43,12 @@ def setup_cfg(args):
     return cfg
 
 
-def save_panoptic(predictions, demo, out_filename):
+def save_panoptic(predictions, _demo, out_filename):
     mask, segments = predictions["panoptic_seg"]
-    for segment in segments:
-        cat_id = segment["category_id"]
-        segment["category_name"] = demo.metadata.stuff_classes[cat_id]
+    # since we use cat_ids from scannet, no need for mapping
+    # for segment in segments:
+    #     cat_id = segment["category_id"]
+    #     segment["category_name"] = demo.metadata.stuff_classes[cat_id]
     with gzip.open(out_filename, "wb") as fid:
         torch.save(
             {

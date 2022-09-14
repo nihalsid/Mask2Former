@@ -4,6 +4,7 @@ from typing import Tuple
 import torch
 from torch import nn
 from torch.nn import functional as F
+import torch_scatter
 
 from detectron2.config import configurable
 from detectron2.data import MetadataCatalog
@@ -12,9 +13,28 @@ from detectron2.modeling.backbone import Backbone
 from detectron2.modeling.postprocessing import sem_seg_postprocess
 from detectron2.structures import Boxes, ImageList, Instances, BitMasks
 from detectron2.utils.memory import retry_if_cuda_oom
-
+from pathlib import Path
 from .modeling.criterion import SetCriterion
 from .modeling.matcher import HungarianMatcher
+
+
+def get_thing_semantics():
+    thing_semantics = [False]
+    for cllist in [x.strip().split(',') for x in Path("scannet_reduced_things.csv").read_text().strip().splitlines()]:
+        thing_semantics.append(bool(int(cllist[1])))
+    return [i for i in range(len(thing_semantics)) if thing_semantics[i]], len(thing_semantics)
+
+
+def get_coco_to_scannet():
+    coco_to_scannet = []
+    invalid_classes = []
+    for cidx, cllist in enumerate([x.strip().split(',') for x in Path("coco_to_scannet_reduced.csv").read_text().strip().splitlines()]):
+        if int(cllist[1]) != -1:
+            coco_to_scannet.append(int(cllist[1]))
+        else:
+            invalid_classes.append(cidx)
+            coco_to_scannet.append(0)
+    return coco_to_scannet, invalid_classes
 
 
 @META_ARCH_REGISTRY.register()
@@ -283,7 +303,86 @@ class MaskFormer(nn.Module):
         semseg = torch.einsum("qc,qhw->chw", mask_cls, mask_pred)
         return semseg
 
+    def panoptic_inference_scannet_reduced(self, mask_cls, mask_pred):
+        scannet_thing_ids, num_scannet_classes = get_thing_semantics()
+        coco_to_scannet, invalid_classes = get_coco_to_scannet()
+
+        mask_pred = mask_pred.sigmoid()
+        pre_scores, pre_labels = F.softmax(mask_cls, dim=-1).max(-1)
+        keep_labels = pre_labels.ne(self.sem_seg_head.num_classes) & (pre_scores > self.object_mask_threshold)
+
+        cur_masks = mask_pred[keep_labels]
+        cur_mask_cls = mask_cls[keep_labels]
+        cur_mask_cls = cur_mask_cls[:, :-1]
+
+        cur_mask_cls_scannet = cur_mask_cls.clone()
+        # -inf for impossible classes
+        cur_mask_cls_scannet[:, invalid_classes] = -float('inf')
+        smax_cur_mask_cls_scannet = F.softmax(cur_mask_cls_scannet, dim=-1)
+        # 0 impossible classes after softmax
+        # smax_cur_mask_cls_scannet[:, invalid_classes] = 0
+
+        smax_reduced_cur_mask_cls_scannet = torch.zeros([smax_cur_mask_cls_scannet.shape[0], num_scannet_classes], device=mask_cls.device)
+        torch_scatter.scatter_add(smax_cur_mask_cls_scannet, index=torch.tensor(coco_to_scannet, device=mask_cls.device).long(), out=smax_reduced_cur_mask_cls_scannet)
+
+        scores, labels = smax_reduced_cur_mask_cls_scannet.max(-1)
+        keep = scores > self.object_mask_threshold
+        cur_scores = scores[keep]
+        cur_classes = labels[keep]
+        cur_masks = cur_masks[keep]
+        cur_mask_cls = cur_mask_cls[keep]
+
+        cur_prob_masks = cur_scores.view(-1, 1, 1) * cur_masks
+        h, w = cur_masks.shape[-2:]
+        panoptic_seg = torch.zeros((h, w), dtype=torch.int32, device=cur_masks.device)
+        segments_info = []
+
+        current_segment_id = 0
+
+        if cur_masks.shape[0] == 0:
+            # We didn't detect any mask :(
+            return panoptic_seg, segments_info
+        else:
+            # take argmax
+            cur_mask_ids = cur_prob_masks.argmax(0)
+            stuff_memory_list = {}
+            for k in range(cur_classes.shape[0]):
+                pred_class = cur_classes[k].item()
+                isthing = pred_class in scannet_thing_ids
+                mask_area = (cur_mask_ids == k).sum().item()
+                original_area = (cur_masks[k] >= 0.5).sum().item()
+                mask = (cur_mask_ids == k) & (cur_masks[k] >= 0.5)
+
+                if mask_area > 0 and original_area > 0 and mask.sum().item() > 0:
+                    if mask_area / original_area < self.overlap_threshold:
+                        continue
+
+                    # merge stuff regions
+                    if not isthing:
+                        if int(pred_class) in stuff_memory_list.keys():
+                            panoptic_seg[mask] = stuff_memory_list[int(pred_class)]
+                            continue
+                        else:
+                            stuff_memory_list[int(pred_class)] = current_segment_id + 1
+
+                    current_segment_id += 1
+                    panoptic_seg[mask] = current_segment_id
+
+                    segments_info.append(
+                        {
+                            "id": current_segment_id,
+                            "isthing": bool(isthing),
+                            "category_id": int(pred_class),
+                            "score": cur_scores[k].item()
+                        }
+                    )
+
+            return panoptic_seg, segments_info
+
     def panoptic_inference(self, mask_cls, mask_pred):
+        return self.panoptic_inference_scannet_reduced(mask_cls, mask_pred)
+
+    def panoptic_inference_coco(self, mask_cls, mask_pred):
         scores, labels = F.softmax(mask_cls, dim=-1).max(-1)
         mask_pred = mask_pred.sigmoid()
 
