@@ -8,6 +8,9 @@ import gzip
 
 # fmt: off
 import sys
+
+from matplotlib import cm
+
 sys.path.insert(1, os.path.join(sys.path[0], '..'))
 # fmt: on
 
@@ -16,6 +19,7 @@ import time
 import warnings
 import torch
 import cv2
+import albumentations as A
 import numpy as np
 import tqdm
 from pathlib import Path
@@ -26,7 +30,9 @@ from detectron2.utils.logger import setup_logger
 
 from mask2former import add_maskformer2_config
 from predictor import VisualizationDemo
-
+from PIL import Image
+import torchvision.transforms as T
+import math
 
 # constants
 WINDOW_NAME = "mask2former demo"
@@ -43,8 +49,40 @@ def setup_cfg(args):
     return cfg
 
 
+def visualize_tensor(tensor, minval=0.000, maxval=1.00, use_global_norm=True):
+    x = tensor.cpu().numpy()
+    x = np.nan_to_num(x)  # change nan to 0
+    if use_global_norm:
+        mi = minval
+        ma = maxval
+    else:
+        mi = np.min(x)  # get minimum depth
+        ma = np.max(x)
+    x = (x - mi) / (ma - mi + 1e-8)  # normalize to 0~1
+    x_ = Image.fromarray((cm.get_cmap('jet')(x) * 255).astype(np.uint8))
+    x_ = T.ToTensor()(x_)[:3, :, :]
+    return x_
+
+
+def probability_to_normalized_entropy(probabilities):
+    entropy = torch.zeros_like(probabilities[:, :, 0])
+    for i in range(probabilities.shape[2]):
+        entropy = entropy - probabilities[:, :, i] * torch.log2(probabilities[:, :, i] + 1e-8)
+    entropy = entropy / math.log2(probabilities.shape[2])
+    return entropy
+
+
+def load_and_save_with_entropy_and_confidence(out_filename, entropy, confidences):
+    from torchvision.io import read_image
+    from torchvision.utils import save_image
+    org_img = read_image(out_filename).float() / 255.0
+    e_img = visualize_tensor(1 - entropy)
+    c_img = visualize_tensor(confidences)
+    save_image(torch.cat([org_img.unsqueeze(0), e_img.unsqueeze(0), c_img.unsqueeze(0)], dim=0), out_filename, value_range=(0, 1), normalize=True)
+
+
 def save_panoptic(predictions, _demo, out_filename):
-    mask, segments = predictions["panoptic_seg"]
+    mask, segments, probabilities, confidences = predictions["panoptic_seg"]
     # since we use cat_ids from scannet, no need for mapping
     # for segment in segments:
     #     cat_id = segment["category_id"]
@@ -54,6 +92,8 @@ def save_panoptic(predictions, _demo, out_filename):
             {
                 "mask": mask,
                 "segments": segments,
+                "probabilities": probabilities,
+                "confidences": confidences
                 #"probs": predictions["panoptic_prob"],
             }, fid
         )
@@ -97,6 +137,18 @@ def get_parser():
         default=[],
         nargs=argparse.REMAINDER,
     )
+    parser.add_argument(
+        "--n",
+        type=int,
+        default=1,
+        help="Max procs",
+    )
+    parser.add_argument(
+        "--p",
+        type=int,
+        default=0,
+        help="Current proc",
+    )
     return parser
 
 
@@ -129,12 +181,37 @@ if __name__ == "__main__":
     demo = VisualizationDemo(cfg)
 
     if args.input:
-        for path in tqdm.tqdm(list(Path(args.input[0]).iterdir()), disable=not args.output):
+        all_files = sorted(list(Path(args.input[0]).iterdir()))
+        used_files = [x for x_i, x in enumerate(all_files) if x_i % args.n == args.p]
+        for path in tqdm.tqdm(used_files, disable=not args.output):
             path = str(path)
             # use PIL, to be consistent with evaluation
             img = read_image(path, format="BGR")
             start_time = time.time()
             predictions, visualized_output = demo.run_on_image(img)
+            predictions['panoptic_seg'] = list(predictions['panoptic_seg'])
+            use_augmentations = True
+            if use_augmentations:
+                augmentations = [A.HorizontalFlip(always_apply=True), A.RGBShift(always_apply=True), A.CLAHE(always_apply=True), A.RandomGamma(always_apply=True, gamma_limit=(80, 120)), A.RandomBrightnessContrast(always_apply=True),
+                                 A.MedianBlur(blur_limit=7, always_apply=True), A.Sharpen(alpha=(0.2, 0.4), lightness=(0.5, 1.0), always_apply=True)]
+                augmentations.extend([A.Compose([augmentations[1], augmentations[2]]),
+                                      A.Compose([augmentations[2], augmentations[3]]),
+                                      A.Compose([augmentations[1], augmentations[3]]),
+                                      A.Compose([augmentations[2], augmentations[4]]),
+                                      A.Compose([augmentations[5], augmentations[6]])])
+                averaged_probs, averaged_conf = predictions["panoptic_seg"][2], predictions["panoptic_seg"][3]
+                for aud_idx, augmentation in enumerate(augmentations):
+                    transformed_image = augmentation(image=img)["image"]
+                    aug_pred, _ = demo.run_on_image(transformed_image, visualize=False)
+                    if not aud_idx == 0:
+                        aug_probs, aug_conf = aug_pred["panoptic_seg"][2], aug_pred["panoptic_seg"][3]
+                    else:
+                        aug_probs, aug_conf = torch.fliplr(aug_pred["panoptic_seg"][2]), torch.fliplr(aug_pred["panoptic_seg"][3])
+                    averaged_probs += aug_probs
+                    averaged_conf += aug_conf
+                averaged_probs /= (len(augmentations) + 1)
+                averaged_conf /= (len(augmentations) + 1)
+                predictions["panoptic_seg"][2], predictions["panoptic_seg"][3] = averaged_probs, averaged_conf
             logger.info(
                 "{}: {} in {:.2f}s".format(
                     path,
@@ -152,6 +229,9 @@ if __name__ == "__main__":
                     assert len(args.input) == 1, "Please specify a directory with args.output"
                     out_filename = args.output
                 visualized_output.save(out_filename)
+                probabilities, confidences = predictions["panoptic_seg"][2], predictions["panoptic_seg"][3]
+                entropy = probability_to_normalized_entropy(probabilities)
+                load_and_save_with_entropy_and_confidence(out_filename, entropy, confidences)
                 if args.predictions:
                     out_filename_noext, _ = os.path.splitext(out_filename)
                     save_panoptic(predictions, demo, out_filename_noext + ".ptz")

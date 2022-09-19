@@ -11,7 +11,7 @@ from pathlib import Path
 from detectron2.data import MetadataCatalog
 from detectron2.engine.defaults import DefaultPredictor
 from detectron2.utils.video_visualizer import VideoVisualizer
-from detectron2.utils.visualizer import ColorMode, Visualizer
+from visualizer import ColorMode, Visualizer
 
 
 class VisualizationDemo(object):
@@ -40,7 +40,7 @@ class VisualizationDemo(object):
                   '#ffd8b1', '#000075', '#a9a9a9', '#f032e6', '#806020', '#ffffff']
         self.colors = [hex_to_rgb(c) for c in colors]
 
-    def run_on_image(self, image):
+    def run_on_image(self, image, visualize=True):
         """
         Args:
             image (np.ndarray): an image of shape (H, W, C) (in BGR order).
@@ -51,28 +51,30 @@ class VisualizationDemo(object):
         """
         vis_output = None
         predictions = self.predictor(image)
+        if visualize:
         # Convert image from OpenCV BGR format to Matplotlib RGB format.
-        image = image[:, :, ::-1]
-        self.metadata = EasyDict()
-        self.metadata.stuff_colors = self.colors
-        self.metadata.thing_colors = self.colors
-        self.metadata.stuff_classes = get_scannet_classes()
-        self.metadata.thing_classes = get_scannet_classes()
-        visualizer = Visualizer(image, self.metadata, instance_mode=self.instance_mode)
-        if "panoptic_seg" in predictions:
-            panoptic_seg, segments_info = predictions["panoptic_seg"]
-            vis_output = visualizer.draw_panoptic_seg_predictions(
-                panoptic_seg.to(self.cpu_device), segments_info
-            )
-        else:
-            if "sem_seg" in predictions:
-                vis_output = visualizer.draw_sem_seg(
-                    predictions["sem_seg"].argmax(dim=0).to(self.cpu_device)
+            image = image[:, :, ::-1]
+            self.metadata = EasyDict()
+            self.metadata.stuff_colors = self.colors
+            self.metadata.thing_colors = self.colors
+            self.metadata.stuff_classes = get_scannet_classes()
+            self.metadata.thing_classes = get_scannet_classes()
+            visualizer = Visualizer(image, self.metadata, instance_mode=self.instance_mode)
+            if "panoptic_seg" in predictions:
+                panoptic_seg, segments_info, panoptic_class_probs, panoptic_mask_conf = predictions["panoptic_seg"]
+                vis_output = visualizer.draw_panoptic_seg_predictions(
+                    panoptic_seg.to(self.cpu_device), segments_info
                 )
-            if "instances" in predictions:
-                instances = predictions["instances"].to(self.cpu_device)
-                vis_output = visualizer.draw_instance_predictions(predictions=instances)
-
+            else:
+                if "sem_seg" in predictions:
+                    vis_output = visualizer.draw_sem_seg(
+                        predictions["sem_seg"].argmax(dim=0).to(self.cpu_device)
+                    )
+                if "instances" in predictions:
+                    instances = predictions["instances"].to(self.cpu_device)
+                    vis_output = visualizer.draw_instance_predictions(predictions=instances)
+        else:
+            vis_output = None
         return predictions, vis_output
 
     def _frame_from_video(self, video):
