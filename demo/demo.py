@@ -11,6 +11,8 @@ import sys
 
 from matplotlib import cm
 
+from tta_handler import TTAHandler
+
 sys.path.insert(1, os.path.join(sys.path[0], '..'))
 # fmt: on
 
@@ -189,17 +191,17 @@ if __name__ == "__main__":
             # use PIL, to be consistent with evaluation
             img = read_image(path, format="BGR")
             start_time = time.time()
-            predictions, visualized_output = demo.run_on_image(img)
-            predictions['panoptic_seg'] = list(predictions['panoptic_seg'])
-            use_augmentations = True
-            if use_augmentations:
-                augmentations = [A.HorizontalFlip(always_apply=True), A.RGBShift(always_apply=True), A.CLAHE(always_apply=True), A.RandomGamma(always_apply=True, gamma_limit=(80, 120)), A.RandomBrightnessContrast(always_apply=True),
-                                 A.MedianBlur(blur_limit=7, always_apply=True), A.Sharpen(alpha=(0.2, 0.4), lightness=(0.5, 1.0), always_apply=True)]
-                augmentations.extend([A.Compose([augmentations[1], augmentations[2]]),
-                                      A.Compose([augmentations[2], augmentations[3]]),
-                                      A.Compose([augmentations[1], augmentations[3]]),
-                                      A.Compose([augmentations[2], augmentations[4]]),
-                                      A.Compose([augmentations[5], augmentations[6]])])
+            augmentations = [A.HorizontalFlip(always_apply=True), A.RGBShift(always_apply=True), A.CLAHE(always_apply=True), A.RandomGamma(always_apply=True, gamma_limit=(80, 120)), A.RandomBrightnessContrast(always_apply=True),
+                             A.MedianBlur(blur_limit=7, always_apply=True), A.Sharpen(alpha=(0.2, 0.4), lightness=(0.5, 1.0), always_apply=True)]
+            augmentations.extend([A.Compose([augmentations[1], augmentations[2]]),
+                                  A.Compose([augmentations[2], augmentations[3]]),
+                                  A.Compose([augmentations[1], augmentations[3]]),
+                                  A.Compose([augmentations[2], augmentations[4]]),
+                                  A.Compose([augmentations[5], augmentations[6]])])
+            use_old_augmentation_method = False
+            if use_old_augmentation_method:
+                predictions, visualized_output = demo.run_on_image(img)
+                predictions['panoptic_seg'] = list(predictions['panoptic_seg'])
                 averaged_probs, averaged_conf = predictions["panoptic_seg"][2].cpu(), predictions["panoptic_seg"][3].cpu()
                 averaged_feats = predictions['res3_feats'].cpu()
                 for aud_idx, augmentation in enumerate(augmentations):
@@ -218,6 +220,30 @@ if __name__ == "__main__":
                 averaged_conf /= (len(augmentations) + 1)
                 averaged_feats /= (len(augmentations) + 1)
                 predictions["panoptic_seg"][2], predictions["panoptic_seg"][3] = averaged_probs, averaged_conf
+                predictions['res3_feats'] = averaged_feats
+            else:
+                predictions, _ = demo.run_on_image(img, visualize=False)
+                averaged_feats = predictions['res3_feats'].cpu()
+                list_aug_probs, list_aug_confs = [], []
+                for aud_idx, augmentation in enumerate(augmentations):
+                    transformed_image = augmentation(image=img)["image"]
+                    aug_pred, _ = demo.run_on_image(transformed_image, visualize=False)
+                    if not aud_idx == 0:
+                        aug_probs, aug_conf = aug_pred["panoptic_seg"][0], aug_pred["panoptic_seg"][1]
+                        aug_feat = aug_pred['res3_feats']
+                    else:
+                        aug_probs, aug_conf = aug_pred["panoptic_seg"][0], torch.fliplr(aug_pred["panoptic_seg"][1].permute((1, 2, 0))).permute((2, 0, 1))
+                        aug_feat = torch.fliplr(aug_pred['res3_feats'])
+                    aug_probs = aug_probs.cpu()
+                    aug_conf = aug_conf.cpu()
+                    list_aug_probs.extend([x for x in aug_probs])
+                    list_aug_confs.extend([x for x in aug_conf])
+                    averaged_feats += aug_feat.cpu()
+                averaged_feats /= (len(augmentations) + 1)
+                tta_handler = TTAHandler(list_aug_probs, list_aug_confs)
+                probabilities, confidences = tta_handler.find_tta_probabilities_and_masks()
+                del tta_handler
+                predictions, visualized_output = demo.run_post_augmentation(img, probabilities, confidences, visualize=True)
                 predictions['res3_feats'] = averaged_feats
             logger.info(
                 "{}: {} in {:.2f}s".format(

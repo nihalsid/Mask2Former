@@ -8,6 +8,10 @@ from collections import deque
 import cv2
 import torch
 from pathlib import Path
+import detectron2.data.transforms as T
+
+from detectron2.checkpoint import DetectionCheckpointer
+from detectron2.modeling import build_model
 from detectron2.data import MetadataCatalog
 from detectron2.engine.defaults import DefaultPredictor
 from detectron2.utils.video_visualizer import VideoVisualizer
@@ -34,7 +38,7 @@ class VisualizationDemo(object):
             num_gpu = torch.cuda.device_count()
             self.predictor = AsyncPredictor(cfg, num_gpus=num_gpu)
         else:
-            self.predictor = DefaultPredictor(cfg)
+            self.predictor = TTAPredictor(cfg)
         colors = ['#e6194B', '#3cb44b', '#ffe119', '#4363d8', '#f58231', '#911eb4', '#42d4f4', '#bfef45',
                   '#fabed4', '#469990', '#dcbeff', '#9A6324', '#fffac8', '#800000', '#aaffc3', '#808000',
                   '#ffd8b1', '#000075', '#a9a9a9', '#f032e6', '#806020', '#ffffff']
@@ -52,29 +56,40 @@ class VisualizationDemo(object):
         vis_output = None
         predictions = self.predictor(image)
         if visualize:
+            vis_output = self.visualize_predicions(image, predictions)
+        return predictions, vis_output
+
+    def visualize_predicions(self, image, predictions):
+
         # Convert image from OpenCV BGR format to Matplotlib RGB format.
-            image = image[:, :, ::-1]
-            self.metadata = EasyDict()
-            self.metadata.stuff_colors = self.colors
-            self.metadata.thing_colors = self.colors
-            self.metadata.stuff_classes = get_scannet_classes()
-            self.metadata.thing_classes = get_scannet_classes()
-            visualizer = Visualizer(image, self.metadata, instance_mode=self.instance_mode)
-            if "panoptic_seg" in predictions:
-                panoptic_seg, segments_info, panoptic_class_probs, panoptic_mask_conf = predictions["panoptic_seg"]
-                vis_output = visualizer.draw_panoptic_seg_predictions(
-                    panoptic_seg.to(self.cpu_device), segments_info
-                )
-            else:
-                if "sem_seg" in predictions:
-                    vis_output = visualizer.draw_sem_seg(
-                        predictions["sem_seg"].argmax(dim=0).to(self.cpu_device)
-                    )
-                if "instances" in predictions:
-                    instances = predictions["instances"].to(self.cpu_device)
-                    vis_output = visualizer.draw_instance_predictions(predictions=instances)
+        image = image[:, :, ::-1]
+        self.metadata = EasyDict()
+        self.metadata.stuff_colors = self.colors
+        self.metadata.thing_colors = self.colors
+        self.metadata.stuff_classes = get_scannet_classes()
+        self.metadata.thing_classes = get_scannet_classes()
+        visualizer = Visualizer(image, self.metadata, instance_mode=self.instance_mode)
+        vis_output = None
+        if "panoptic_seg" in predictions:
+            panoptic_seg, segments_info, panoptic_class_probs, panoptic_mask_conf = predictions["panoptic_seg"]
+            vis_output = visualizer.draw_panoptic_seg_predictions(
+                panoptic_seg.to(self.cpu_device), segments_info
+            )
         else:
-            vis_output = None
+            if "sem_seg" in predictions:
+                vis_output = visualizer.draw_sem_seg(
+                    predictions["sem_seg"].argmax(dim=0).to(self.cpu_device)
+                )
+            if "instances" in predictions:
+                instances = predictions["instances"].to(self.cpu_device)
+                vis_output = visualizer.draw_instance_predictions(predictions=instances)
+        return vis_output
+
+    def run_post_augmentation(self, image, probabilities, confidencies, visualize=True):
+        vis_output = None
+        predictions = self.predictor.post_augmentation_forward(probabilities, confidencies)
+        if visualize:
+            vis_output = self.visualize_predicions(image, predictions)
         return predictions, vis_output
 
     def _frame_from_video(self, video):
@@ -228,6 +243,55 @@ class AsyncPredictor:
     @property
     def default_buffer_size(self):
         return len(self.procs) * 5
+
+
+class TTAPredictor:
+
+    def __init__(self, cfg):
+        self.cfg = cfg.clone()  # cfg can be modified by model
+        self.model = build_model(self.cfg)
+        self.model.eval()
+        if len(cfg.DATASETS.TEST):
+            self.metadata = MetadataCatalog.get(cfg.DATASETS.TEST[0])
+
+        checkpointer = DetectionCheckpointer(self.model)
+        checkpointer.load(cfg.MODEL.WEIGHTS)
+
+        self.aug = T.ResizeShortestEdge(
+            [cfg.INPUT.MIN_SIZE_TEST, cfg.INPUT.MIN_SIZE_TEST], cfg.INPUT.MAX_SIZE_TEST
+        )
+
+        self.input_format = cfg.INPUT.FORMAT
+        assert self.input_format in ["RGB", "BGR"], self.input_format
+
+    def __call__(self, original_image):
+        """
+        Args:
+            original_image (np.ndarray): an image of shape (H, W, C) (in BGR order).
+
+        Returns:
+            predictions (dict):
+                the output of the model for one image only.
+                See :doc:`/tutorials/models` for details about the format.
+        """
+        with torch.no_grad():  # https://github.com/sphinx-doc/sphinx/issues/4258
+            # Apply pre-processing to image.
+            if self.input_format == "RGB":
+                # whether the model expects BGR inputs or RGB
+                original_image = original_image[:, :, ::-1]
+            height, width = original_image.shape[:2]
+            image = self.aug.get_transform(original_image).apply_image(original_image)
+            image = torch.as_tensor(image.astype("float32").transpose(2, 0, 1))
+
+            inputs = {"image": image, "height": height, "width": width}
+            predictions = self.model([inputs])[0]
+            return predictions
+
+    def post_augmentation_forward(self, probabilities, confidences):
+
+        with torch.no_grad():  # https://github.com/sphinx-doc/sphinx/issues/4258
+            predictions = self.model.post_tta_merging(probabilities, confidences)[0]
+            return predictions
 
 
 def hex_to_rgb(x):

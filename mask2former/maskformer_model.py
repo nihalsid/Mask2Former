@@ -334,13 +334,13 @@ class MaskFormer(nn.Module):
         cur_scores = scores[keep]
         cur_classes = labels[keep]
         cur_masks = pre_cur_masks[keep]
-        cur_mask_cls_confidences = smax_reduced_cur_mask_cls_scannet[keep]
+        cur_mask_cls_probabilities = smax_reduced_cur_mask_cls_scannet[keep]
 
         cur_prob_masks = cur_scores.view(-1, 1, 1) * cur_masks
         h, w = cur_masks.shape[-2:]
         panoptic_seg = torch.zeros((h, w), dtype=torch.int32, device=cur_masks.device)
-        pano_seg_confidences = torch.zeros((h, w, num_scannet_classes), dtype=torch.float32, device=cur_masks.device)
-        pano_seg_confidences[:, :, 0] = 1.
+        pano_seg_probabilities = torch.zeros((h, w, num_scannet_classes), dtype=torch.float32, device=cur_masks.device)
+        pano_seg_probabilities[:, :, 0] = 1.
         pano_seg_mask_preds = torch.ones((h, w), dtype=torch.float32, device=cur_masks.device)
         segments_info = []
 
@@ -368,7 +368,7 @@ class MaskFormer(nn.Module):
                     if not isthing:
                         if int(pred_class) in stuff_memory_list.keys():
                             panoptic_seg[mask] = stuff_memory_list[int(pred_class)]
-                            pano_seg_confidences[mask, :] = cur_mask_cls_confidences[k, :]
+                            pano_seg_probabilities[mask, :] = cur_mask_cls_probabilities[k, :]
                             pano_seg_mask_preds[mask] = cur_masks[k, mask]
                             continue
                         else:
@@ -376,7 +376,7 @@ class MaskFormer(nn.Module):
 
                     current_segment_id += 1
                     panoptic_seg[mask] = current_segment_id
-                    pano_seg_confidences[mask, :] = cur_mask_cls_confidences[k, :]
+                    pano_seg_probabilities[mask, :] = cur_mask_cls_probabilities[k, :]
                     pano_seg_mask_preds[mask] = cur_masks[k, mask]
 
                     segments_info.append(
@@ -388,10 +388,102 @@ class MaskFormer(nn.Module):
                         }
                     )
 
-            return panoptic_seg, segments_info, pano_seg_confidences, pano_seg_mask_preds
+            return panoptic_seg, segments_info, pano_seg_probabilities, pano_seg_mask_preds
+
+    def panoptic_inference_scannet_reduced_separate_masks(self, mask_cls, mask_pred):
+        scannet_thing_ids, num_scannet_classes = get_thing_semantics()
+        coco_to_scannet, invalid_classes = get_coco_to_scannet()
+
+        mask_pred = mask_pred.sigmoid()
+        pre_scores, pre_labels = F.softmax(mask_cls, dim=-1).max(-1)
+        # todo: for now removing (pre_scores > self.object_mask_threshold)
+        keep_labels = pre_labels.ne(self.sem_seg_head.num_classes) #& (pre_scores > self.object_mask_threshold)
+
+        pre_cur_masks = mask_pred[keep_labels]
+        pre_cur_mask_cls = mask_cls[keep_labels]
+        pre_cur_mask_cls = pre_cur_mask_cls[:, :-1]
+
+        cur_mask_cls_scannet = pre_cur_mask_cls.clone()
+        # -inf for impossible classes
+        cur_mask_cls_scannet[:, invalid_classes] = -float('inf')
+        smax_cur_mask_cls_scannet = F.softmax(cur_mask_cls_scannet, dim=-1)
+        # 0 impossible classes after softmax
+        # smax_cur_mask_cls_scannet[:, invalid_classes] = 0
+
+        smax_reduced_cur_mask_cls_scannet = torch.zeros([smax_cur_mask_cls_scannet.shape[0], num_scannet_classes], device=mask_cls.device)
+        torch_scatter.scatter_add(smax_cur_mask_cls_scannet, index=torch.tensor(coco_to_scannet, device=mask_cls.device).long(), out=smax_reduced_cur_mask_cls_scannet)
+
+        scores, labels = smax_reduced_cur_mask_cls_scannet.max(-1)
+        # todo: for now removing scores > self.object_mask_threshold
+        # keep = scores > self.object_mask_threshold
+        # note: everything is kept in the below keep mask, it is all true's
+        keep = torch.ones_like(scores > self.object_mask_threshold).bool()
+        cur_masks = pre_cur_masks[keep]
+        cur_mask_cls_probabilities = smax_reduced_cur_mask_cls_scannet[keep]
+        return cur_mask_cls_probabilities, cur_masks
+
+    def post_tta_merging(self, cur_mask_cls_probabilities, cur_masks):
+        cur_mask_cls_probabilities = cur_mask_cls_probabilities.to(self.device)
+        cur_masks = cur_masks.to(self.device)
+        scannet_thing_ids, num_scannet_classes = get_thing_semantics()
+        processed_results = [{}]
+        cur_scores, cur_classes = cur_mask_cls_probabilities.max(-1)
+        cur_prob_masks = cur_scores.view(-1, 1, 1) * cur_masks
+        h, w = cur_masks.shape[-2:]
+        panoptic_seg = torch.zeros((h, w), dtype=torch.int32, device=cur_masks.device)
+        pano_seg_probabilities = torch.zeros((h, w, num_scannet_classes), dtype=torch.float32, device=cur_masks.device)
+        pano_seg_probabilities[:, :, 0] = 1.
+        pano_seg_mask_preds = torch.ones((h, w), dtype=torch.float32, device=cur_masks.device)
+        segments_info = []
+
+        current_segment_id = 0
+
+        if cur_masks.shape[0] == 0:
+            # We didn't detect any mask :(
+            processed_results[-1]["panoptic_seg"] = panoptic_seg, segments_info
+        else:
+            # take argmax
+            cur_mask_ids = cur_prob_masks.argmax(0)
+            stuff_memory_list = {}
+            for k in range(cur_classes.shape[0]):
+                pred_class = cur_classes[k].item()
+                isthing = pred_class in scannet_thing_ids
+                mask_area = (cur_mask_ids == k).sum().item()
+                original_area = (cur_masks[k] >= 0.5).sum().item()
+                mask = (cur_mask_ids == k) & (cur_masks[k] >= 0.5)
+
+                if mask_area > 0 and original_area > 0 and mask.sum().item() > 0:
+                    if mask_area / original_area < self.overlap_threshold:
+                        continue
+
+                    # merge stuff regions
+                    if not isthing:
+                        if int(pred_class) in stuff_memory_list.keys():
+                            panoptic_seg[mask] = stuff_memory_list[int(pred_class)]
+                            pano_seg_probabilities[mask, :] = cur_mask_cls_probabilities[k, :]
+                            pano_seg_mask_preds[mask] = cur_prob_masks[k, mask]
+                            continue
+                        else:
+                            stuff_memory_list[int(pred_class)] = current_segment_id + 1
+
+                    current_segment_id += 1
+                    panoptic_seg[mask] = current_segment_id
+                    pano_seg_probabilities[mask, :] = cur_mask_cls_probabilities[k, :]
+                    pano_seg_mask_preds[mask] = cur_prob_masks[k, mask]
+
+                    segments_info.append(
+                        {
+                            "id": current_segment_id,
+                            "isthing": bool(isthing),
+                            "category_id": int(pred_class),
+                            "score": cur_scores[k].item(),
+                        }
+                    )
+            processed_results[-1]["panoptic_seg"] = panoptic_seg, segments_info, pano_seg_probabilities, pano_seg_mask_preds
+        return processed_results
 
     def panoptic_inference(self, mask_cls, mask_pred):
-        return self.panoptic_inference_scannet_reduced(mask_cls, mask_pred)
+        return self.panoptic_inference_scannet_reduced_separate_masks(mask_cls, mask_pred)
 
     def panoptic_inference_coco(self, mask_cls, mask_pred):
         scores, labels = F.softmax(mask_cls, dim=-1).max(-1)
