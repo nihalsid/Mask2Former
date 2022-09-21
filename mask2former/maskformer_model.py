@@ -273,6 +273,7 @@ class MaskFormer(nn.Module):
                 if self.panoptic_on:
                     panoptic_r = retry_if_cuda_oom(self.panoptic_inference)(mask_cls_result, mask_pred_result)
                     processed_results[-1]["panoptic_seg"] = panoptic_r
+                    processed_results[-1]["res3_feats"] = features['res3'][0].permute((1, 2, 0))
                 
                 # instance segmentation inference
                 if self.instance_on:

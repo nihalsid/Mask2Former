@@ -93,7 +93,8 @@ def save_panoptic(predictions, _demo, out_filename):
                 "mask": mask,
                 "segments": segments,
                 "probabilities": probabilities,
-                "confidences": confidences
+                "confidences": confidences,
+                "feats": predictions["res3_feats"]
                 #"probs": predictions["panoptic_prob"],
             }, fid
         )
@@ -199,19 +200,25 @@ if __name__ == "__main__":
                                       A.Compose([augmentations[1], augmentations[3]]),
                                       A.Compose([augmentations[2], augmentations[4]]),
                                       A.Compose([augmentations[5], augmentations[6]])])
-                averaged_probs, averaged_conf = predictions["panoptic_seg"][2], predictions["panoptic_seg"][3]
+                averaged_probs, averaged_conf = predictions["panoptic_seg"][2].cpu(), predictions["panoptic_seg"][3].cpu()
+                averaged_feats = predictions['res3_feats'].cpu()
                 for aud_idx, augmentation in enumerate(augmentations):
                     transformed_image = augmentation(image=img)["image"]
                     aug_pred, _ = demo.run_on_image(transformed_image, visualize=False)
                     if not aud_idx == 0:
                         aug_probs, aug_conf = aug_pred["panoptic_seg"][2], aug_pred["panoptic_seg"][3]
+                        aug_feat = aug_pred['res3_feats']
                     else:
                         aug_probs, aug_conf = torch.fliplr(aug_pred["panoptic_seg"][2]), torch.fliplr(aug_pred["panoptic_seg"][3])
-                    averaged_probs += aug_probs
-                    averaged_conf += aug_conf
+                        aug_feat = torch.fliplr(aug_pred['res3_feats'])
+                    averaged_probs += aug_probs.cpu()
+                    averaged_conf += aug_conf.cpu()
+                    averaged_feats += aug_feat.cpu()
                 averaged_probs /= (len(augmentations) + 1)
                 averaged_conf /= (len(augmentations) + 1)
+                averaged_feats /= (len(augmentations) + 1)
                 predictions["panoptic_seg"][2], predictions["panoptic_seg"][3] = averaged_probs, averaged_conf
+                predictions['res3_feats'] = averaged_feats
             logger.info(
                 "{}: {} in {:.2f}s".format(
                     path,
