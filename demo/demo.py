@@ -85,7 +85,7 @@ def load_and_save_with_entropy_and_confidence(out_filename, entropy, confidences
 
 def save_panoptic(predictions, predictions_notta, _demo, out_filename):
     mask, segments, probabilities, confidences = predictions["panoptic_seg"]
-    mask_notta, segments_notta, _, _ = predictions_notta["panoptic_seg"]
+    mask_notta, segments_notta, _, confidences_notta = predictions_notta["panoptic_seg"]
     # since we use cat_ids from scannet, no need for mapping
     # for segment in segments:
     #     cat_id = segment["category_id"]
@@ -97,6 +97,7 @@ def save_panoptic(predictions, predictions_notta, _demo, out_filename):
                 "segments": segments,
                 "mask_notta": mask_notta,
                 "segments_notta": segments_notta,
+                "confidences_notta": confidences_notta,
                 "probabilities": probabilities,
                 "confidences": confidences,
                 # "feats": predictions["res3_feats"]
