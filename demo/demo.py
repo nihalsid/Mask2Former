@@ -240,8 +240,10 @@ if __name__ == "__main__":
                     list_aug_confs.extend([x for x in aug_conf])
                     averaged_feats += aug_feat.cpu()
                 averaged_feats /= (len(augmentations) + 1)
+                tta_handler_start_time = time.time()
                 tta_handler = TTAHandler(list_aug_probs, list_aug_confs)
                 probabilities, confidences = tta_handler.find_tta_probabilities_and_masks()
+                print(f'TTA Handler time: {time.time() - tta_handler_start_time:.2f}s')
                 del tta_handler
                 predictions, visualized_output = demo.run_post_augmentation(img, probabilities, confidences, visualize=True)
                 predictions['res3_feats'] = averaged_feats
