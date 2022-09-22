@@ -83,8 +83,9 @@ def load_and_save_with_entropy_and_confidence(out_filename, entropy, confidences
     save_image(torch.cat([org_img.unsqueeze(0), e_img.unsqueeze(0), c_img.unsqueeze(0)], dim=0), out_filename, value_range=(0, 1), normalize=True)
 
 
-def save_panoptic(predictions, _demo, out_filename):
+def save_panoptic(predictions, predictions_notta, _demo, out_filename):
     mask, segments, probabilities, confidences = predictions["panoptic_seg"]
+    mask_notta, segments_notta, _, _ = predictions_notta["panoptic_seg"]
     # since we use cat_ids from scannet, no need for mapping
     # for segment in segments:
     #     cat_id = segment["category_id"]
@@ -94,10 +95,11 @@ def save_panoptic(predictions, _demo, out_filename):
             {
                 "mask": mask,
                 "segments": segments,
+                "mask_notta": mask_notta,
+                "segments_notta": segments_notta,
                 "probabilities": probabilities,
                 "confidences": confidences,
-                "feats": predictions["res3_feats"]
-                #"probs": predictions["panoptic_prob"],
+                # "feats": predictions["res3_feats"]
             }, fid
         )
 
@@ -182,7 +184,6 @@ if __name__ == "__main__":
     cfg = setup_cfg(args)
 
     demo = VisualizationDemo(cfg)
-
     if args.input:
         all_files = sorted(list(Path(args.input[0]).iterdir()))
         used_files = [x for x_i, x in enumerate(all_files) if x_i % args.n == args.p]
@@ -222,9 +223,9 @@ if __name__ == "__main__":
                 predictions["panoptic_seg"][2], predictions["panoptic_seg"][3] = averaged_probs, averaged_conf
                 predictions['res3_feats'] = averaged_feats
             else:
-                predictions, _ = demo.run_on_image(img, visualize=False)
-                averaged_feats = predictions['res3_feats'].cpu()
-                list_aug_probs, list_aug_confs = [], []
+                predictions_0, _ = demo.run_on_image(img, visualize=False)
+                averaged_feats = predictions_0['res3_feats'].cpu()
+                list_aug_probs, list_aug_confs = [x.cpu() for x in predictions_0["panoptic_seg"][0]], [x.cpu() for x in predictions_0["panoptic_seg"][1]]
                 for aud_idx, augmentation in enumerate(augmentations):
                     transformed_image = augmentation(image=img)["image"]
                     aug_pred, _ = demo.run_on_image(transformed_image, visualize=False)
@@ -246,6 +247,7 @@ if __name__ == "__main__":
                 print(f'TTA Handler time: {time.time() - tta_handler_start_time:.2f}s')
                 del tta_handler
                 predictions, visualized_output = demo.run_post_augmentation(img, probabilities, confidences, visualize=True)
+                predictions_no_tta, _ = demo.run_post_augmentation(img, predictions_0["panoptic_seg"][0], predictions_0["panoptic_seg"][1], visualize=False)
                 predictions['res3_feats'] = averaged_feats
             logger.info(
                 "{}: {} in {:.2f}s".format(
@@ -269,7 +271,7 @@ if __name__ == "__main__":
                 load_and_save_with_entropy_and_confidence(out_filename, entropy, confidences)
                 if args.predictions:
                     out_filename_noext, _ = os.path.splitext(out_filename)
-                    save_panoptic(predictions, demo, out_filename_noext + ".ptz")
+                    save_panoptic(predictions, predictions_no_tta, demo, out_filename_noext + ".ptz")
             else:
                 cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
                 cv2.imshow(WINDOW_NAME, visualized_output.get_image()[:, :, ::-1])
