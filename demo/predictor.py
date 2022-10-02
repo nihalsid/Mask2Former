@@ -15,6 +15,8 @@ from detectron2.modeling import build_model
 from detectron2.data import MetadataCatalog
 from detectron2.engine.defaults import DefaultPredictor
 from detectron2.utils.video_visualizer import VideoVisualizer
+
+from demo_constant import sc_version, sc_colors
 from visualizer import ColorMode, Visualizer
 
 
@@ -39,9 +41,7 @@ class VisualizationDemo(object):
             self.predictor = AsyncPredictor(cfg, num_gpus=num_gpu)
         else:
             self.predictor = TTAPredictor(cfg)
-        colors = ['#e6194B', '#3cb44b', '#ffe119', '#4363d8', '#f58231', '#911eb4', '#42d4f4', '#bfef45',
-                  '#fabed4', '#469990', '#dcbeff', '#9A6324', '#fffac8', '#800000', '#aaffc3', '#808000',
-                  '#ffd8b1', '#000075', '#a9a9a9', '#f032e6', '#806020', '#ffffff']
+        colors = sc_colors[sc_version]
         self.colors = [hex_to_rgb(c) for c in colors]
 
     def run_on_image(self, image, visualize=True):
@@ -300,7 +300,7 @@ def hex_to_rgb(x):
 
 def get_scannet_classes():
     class_names = ["none"]
-    for cllist in [x.strip().split(',') for x in Path("scannet_reduced_things.csv").read_text().strip().splitlines()]:
+    for cllist in [x.strip().split(',') for x in Path(f"scannet_{sc_version}_things.csv").read_text().strip().splitlines()]:
         class_names.append(cllist[0])
     return class_names
 

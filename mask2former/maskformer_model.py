@@ -14,13 +14,15 @@ from detectron2.modeling.postprocessing import sem_seg_postprocess
 from detectron2.structures import Boxes, ImageList, Instances, BitMasks
 from detectron2.utils.memory import retry_if_cuda_oom
 from pathlib import Path
+
+from demo_constant import sc_version
 from .modeling.criterion import SetCriterion
 from .modeling.matcher import HungarianMatcher
 
 
 def get_thing_semantics():
     thing_semantics = [False]
-    for cllist in [x.strip().split(',') for x in Path("scannet_reduced_things.csv").read_text().strip().splitlines()]:
+    for cllist in [x.strip().split(',') for x in Path(f"scannet_{sc_version}_things.csv").read_text().strip().splitlines()]:
         thing_semantics.append(bool(int(cllist[1])))
     return [i for i in range(len(thing_semantics)) if thing_semantics[i]], len(thing_semantics)
 
@@ -28,7 +30,7 @@ def get_thing_semantics():
 def get_coco_to_scannet():
     coco_to_scannet = []
     invalid_classes = []
-    for cidx, cllist in enumerate([x.strip().split(',') for x in Path("coco_to_scannet_reduced.csv").read_text().strip().splitlines()]):
+    for cidx, cllist in enumerate([x.strip().split(',') for x in Path(f"coco_to_scannet_{sc_version}.csv").read_text().strip().splitlines()]):
         if int(cllist[1]) != -1:
             coco_to_scannet.append(int(cllist[1]))
         else:
