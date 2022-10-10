@@ -205,51 +205,53 @@ if __name__ == "__main__":
                 predictions, visualized_output = demo.run_on_image(img)
                 predictions['panoptic_seg'] = list(predictions['panoptic_seg'])
                 averaged_probs, averaged_conf = predictions["panoptic_seg"][2].cpu(), predictions["panoptic_seg"][3].cpu()
-                averaged_feats = predictions['res3_feats'].cpu()
+                # averaged_feats = predictions['res3_feats'].cpu()
                 for aud_idx, augmentation in enumerate(augmentations):
                     transformed_image = augmentation(image=img)["image"]
                     aug_pred, _ = demo.run_on_image(transformed_image, visualize=False)
                     if not aud_idx == 0:
                         aug_probs, aug_conf = aug_pred["panoptic_seg"][2], aug_pred["panoptic_seg"][3]
-                        aug_feat = aug_pred['res3_feats']
+                        # aug_feat = aug_pred['res3_feats']
                     else:
                         aug_probs, aug_conf = torch.fliplr(aug_pred["panoptic_seg"][2]), torch.fliplr(aug_pred["panoptic_seg"][3])
-                        aug_feat = torch.fliplr(aug_pred['res3_feats'])
+                        # aug_feat = torch.fliplr(aug_pred['res3_feats'])
                     averaged_probs += aug_probs.cpu()
                     averaged_conf += aug_conf.cpu()
-                    averaged_feats += aug_feat.cpu()
+                    # averaged_feats += aug_feat.cpu()
                 averaged_probs /= (len(augmentations) + 1)
                 averaged_conf /= (len(augmentations) + 1)
-                averaged_feats /= (len(augmentations) + 1)
+                # averaged_feats /= (len(augmentations) + 1)
                 predictions["panoptic_seg"][2], predictions["panoptic_seg"][3] = averaged_probs, averaged_conf
-                predictions['res3_feats'] = averaged_feats
+                # predictions['res3_feats'] = averaged_feats
             else:
                 predictions_0, _ = demo.run_on_image(img, visualize=False)
-                averaged_feats = predictions_0['res3_feats'].cpu()
+                # averaged_feats = predictions_0['res3_feats'].cpu()
                 list_aug_probs, list_aug_confs = [x.cpu() for x in predictions_0["panoptic_seg"][0]], [x.cpu() for x in predictions_0["panoptic_seg"][1]]
                 for aud_idx, augmentation in enumerate(augmentations):
                     transformed_image = augmentation(image=img)["image"]
                     aug_pred, _ = demo.run_on_image(transformed_image, visualize=False)
                     if not aud_idx == 0:
                         aug_probs, aug_conf = aug_pred["panoptic_seg"][0], aug_pred["panoptic_seg"][1]
-                        aug_feat = aug_pred['res3_feats']
+                        # aug_feat = aug_pred['res3_feats']
                     else:
                         aug_probs, aug_conf = aug_pred["panoptic_seg"][0], torch.fliplr(aug_pred["panoptic_seg"][1].permute((1, 2, 0))).permute((2, 0, 1))
-                        aug_feat = torch.fliplr(aug_pred['res3_feats'])
+                        # aug_feat = torch.fliplr(aug_pred['res3_feats'])
                     aug_probs = aug_probs.cpu()
                     aug_conf = aug_conf.cpu()
                     list_aug_probs.extend([x for x in aug_probs])
                     list_aug_confs.extend([x for x in aug_conf])
-                    averaged_feats += aug_feat.cpu()
-                averaged_feats /= (len(augmentations) + 1)
+                    # averaged_feats += aug_feat.cpu()
+                # averaged_feats /= (len(augmentations) + 1)
                 tta_handler_start_time = time.time()
                 tta_handler = TTAHandler(list_aug_probs, list_aug_confs)
                 probabilities, confidences = tta_handler.find_tta_probabilities_and_masks()
                 print(f'TTA Handler time: {time.time() - tta_handler_start_time:.2f}s')
                 del tta_handler
-                predictions, visualized_output = demo.run_post_augmentation(img, probabilities, confidences, visualize=True)
+                # todo: deleted visualizations for now, turn on if needed
+                # predictions, visualized_output = demo.run_post_augmentation(img, probabilities, confidences, visualize=True)
+                predictions, visualized_output = demo.run_post_augmentation(img, probabilities, confidences, visualize=False)
                 predictions_no_tta, _ = demo.run_post_augmentation(img, predictions_0["panoptic_seg"][0], predictions_0["panoptic_seg"][1], visualize=False)
-                predictions['res3_feats'] = averaged_feats
+                # predictions['res3_feats'] = averaged_feats
             logger.info(
                 "{}: {} in {:.2f}s".format(
                     path,
@@ -266,10 +268,11 @@ if __name__ == "__main__":
                 else:
                     assert len(args.input) == 1, "Please specify a directory with args.output"
                     out_filename = args.output
-                visualized_output.save(out_filename)
-                probabilities, confidences = predictions["panoptic_seg"][2], predictions["panoptic_seg"][3]
-                entropy = probability_to_normalized_entropy(probabilities)
-                load_and_save_with_entropy_and_confidence(out_filename, entropy, confidences)
+                if visualized_output is not None:
+                    visualized_output.save(out_filename)
+                    probabilities, confidences = predictions["panoptic_seg"][2], predictions["panoptic_seg"][3]
+                    entropy = probability_to_normalized_entropy(probabilities)
+                    load_and_save_with_entropy_and_confidence(out_filename, entropy, confidences)
                 if args.predictions:
                     out_filename_noext, _ = os.path.splitext(out_filename)
                     save_panoptic(predictions, predictions_no_tta, demo, out_filename_noext + ".ptz")
