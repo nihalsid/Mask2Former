@@ -188,7 +188,7 @@ if __name__ == "__main__":
     if args.input:
         all_files = sorted(list(Path(args.input[0]).iterdir()))
         used_files = [x for x_i, x in enumerate(all_files) if x_i % args.n == args.p]
-        used_files = [x for x in enumerate(used_files) if not Path(os.path.splitext(os.path.join(args.output, os.path.basename(str(x))))[0] + ".ptz").exists()]
+        used_files = [x for x in used_files if not Path(os.path.splitext(os.path.join(args.output, os.path.basename(str(x))))[0] + ".ptz").exists()]
         for path in tqdm.tqdm(used_files, disable=not args.output):
             path = str(path)
             # use PIL, to be consistent with evaluation
